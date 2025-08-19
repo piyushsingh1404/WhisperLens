@@ -11,3 +11,26 @@ node_modules/
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
+*.log
+
+# OS junk
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Build & cache
+dist/
+build/
+*.cache
+
+# Large binaries
+*.exe
+*.dll
+*.msi
+*.appxbundle
+*.iso
+*.zip
+*.rar
+
+# Shortcuts
+*.lnk
