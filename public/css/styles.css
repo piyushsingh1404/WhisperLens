@@ -1,0 +1,78 @@
+/* Theme tweaks */
+:root {
+  --brand: #635bff;         /* primary */
+  --brand-2: #00d4ff;       /* accent */
+  --ink: #1f2937;           /* text */
+}
+
+body {
+  color: var(--ink);
+  background:
+    radial-gradient(1200px 600px at 10% -10%, rgba(99,91,255,.10), transparent 60%),
+    radial-gradient(1200px 600px at 110% 10%, rgba(0,212,255,.10), transparent 60%),
+    #f7f7fb;
+}
+
+.container-narrow { max-width: 960px; }
+
+.navbar {
+  backdrop-filter: saturate(140%) blur(8px);
+}
+
+/* Brand text gradient */
+.brand-gradient {
+  background: linear-gradient(90deg, var(--brand) 0%, var(--brand-2) 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+/* Card polish */
+.card.app-card {
+  border: 1px solid rgba(0,0,0,.06);
+  box-shadow: 0 8px 24px rgba(18,18,23,.06);
+  transition: transform .2s ease, box-shadow .2s ease;
+  border-radius: 14px;
+}
+.card.app-card:hover { transform: translateY(-2px); box-shadow: 0 12px 28px rgba(18,18,23,.08); }
+
+.badge-soft {
+  --tw: 0, 167, 232;
+  background: rgba(var(--tw), .12);
+  color: rgb(var(--tw));
+  border: 1px solid rgba(var(--tw), .22);
+}
+
+/* summary chip */
+.summary-chip {
+  background: rgba(99,91,255,.12);
+  border: 1px solid rgba(99,91,255,.28);
+  color: #3b34c9;
+  font-weight: 600;
+  padding: .25rem .5rem;
+  border-radius: 999px;
+}
+
+/* category pill */
+.category-pill {
+  background: rgba(31,41,55,.06);
+  border: 1px solid rgba(31,41,55,.18);
+  color: #334155;
+  border-radius: 999px;
+  padding: .35rem .6rem;
+  font-weight: 600;
+}
+
+/* circle avatar (first letter) */
+.avatar {
+  width: 36px; height: 36px; display: grid; place-items: center;
+  border-radius: 50%;
+  font-weight: 700; color: #fff; background: linear-gradient(135deg, var(--brand), var(--brand-2));
+}
+
+/* CTA buttons nicer radius */
+.btn { border-radius: 10px; }
+.btn-pill { border-radius: 999px; }
+
+/* Footer */
+.site-footer { color:#6b7280; }
