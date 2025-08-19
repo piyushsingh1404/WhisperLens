@@ -1,8 +1,8 @@
 /* ================================== Setup ================================== */
 require("dotenv").config();
 
+const path = require("path");
 const express = require("express");
-const bodyParser = require("body-parser");
 const ejs = require("ejs");
 const mongoose = require("mongoose");
 const session = require("express-session");
@@ -22,8 +22,10 @@ const app = express();
 
 /* ============================== Express Core ============================== */
 app.set("view engine", "ejs");
+app.set("views", path.join(__dirname, "views"));
 app.use(express.static("public"));
-app.use(bodyParser.urlencoded({ extended: true }));
+// built-in body parser
+app.use(express.urlencoded({ extended: true }));
 
 app.use(
   helmet({
@@ -32,9 +34,7 @@ app.use(
   })
 );
 
-// app.set("trust proxy", 1) // if behind LB/proxy
-
-// enable trust proxy if behind a load balancer (Render, Railway, etc.)
+// many PaaS sit behind a proxy
 app.set("trust proxy", 1);
 
 app.use(
@@ -43,8 +43,8 @@ app.use(
     resave: false,
     saveUninitialized: false,
     cookie: {
-      secure: process.env.NODE_ENV === "production", // https only in prod
-      sameSite: process.env.NODE_ENV === "production" ? "lax" : "lax",
+      secure: process.env.NODE_ENV === "production",
+      sameSite: "lax",
       httpOnly: true,
       maxAge: 1000 * 60 * 60 * 8, // 8 hours
     },
@@ -79,10 +79,9 @@ mongoose.set("strictQuery", true);
 
 /* ---- User (auth only) ---- */
 const userSchema = new mongoose.Schema({
-  username: String,
-  password: String,
+  username: { type: String, index: true, unique: false }, // PLM manages unique index
 });
-userSchema.plugin(passportLocalMongoose);
+userSchema.plugin(passportLocalMongoose); // adds hash/salt + helpers
 const User = mongoose.model("User", userSchema);
 
 /* ---- Secret (collection) ---- */
@@ -94,7 +93,7 @@ const secretSchema = new mongoose.Schema(
     aiCategory: { type: String, index: true },
     aiSource: String,
     pseudonym: { type: String, index: true },
-    likes: [{ type: mongoose.Schema.Types.ObjectId, ref: "User", index: true }],
+    likes: [{ type: mongoose.Schema.Types.ObjectId, ref: "User", index: true }], // harmless if unused
   },
   { timestamps: true }
 );
@@ -134,7 +133,6 @@ function randomPseudonym() {
   const n = Math.floor(10 + Math.random() * 89);
   return `${c}${a}${n}`;
 }
-
 function makeStablePseudonym(userId) {
   const colors  = ["Purple","Crimson","Azure","Emerald","Amber","Ivory","Onyx","Silver","Golden","Teal"];
   const animals = ["Lion","Tiger","Panda","Eagle","Shark","Wolf","Falcon","Koala","Otter","Cobra"];
@@ -145,7 +143,6 @@ function makeStablePseudonym(userId) {
   const d = 10 + (n % 90);
   return `${c}${a}${d}`;
 }
-
 function avatarColorFromName(name = "") {
   const palette = [
     "#E57373","#F06292","#BA68C8","#9575CD","#7986CB",
@@ -158,7 +155,6 @@ function avatarColorFromName(name = "") {
   for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) >>> 0;
   return palette[h % palette.length];
 }
-
 function catIcon(cat = "Other") {
   const map = {
     Work: "briefcase",
@@ -185,16 +181,55 @@ function localSummarize(text) {
   if (!/[.!?]$/.test(summary)) summary += ".";
   return summary;
 }
+
+/* Stronger heuristic */
 function localCategory(text) {
   const t = (text || "").toLowerCase();
-  if (/(job|office|boss|salary|work|company|client)/.test(t)) return "Work";
-  if (/(mom|dad|brother|sister|family|married|husband|wife)/.test(t)) return "Family";
-  if (/(loan|money|debt|paid|budget|bank|rupees|rs)/.test(t)) return "Finance";
-  if (/(doctor|ill|sick|health|hospital|medicine|anxiety|depressed)/.test(t)) return "Health";
-  if (/(school|college|exam|study|class|teacher)/.test(t)) return "School";
-  if (/(advice|suggest|tip)/.test(t)) return "Advice";
-  if (/(love|crush|relationship|guilty|sorry|confess)/.test(t)) return "Confession";
+
+  // Work
+  if (/(job|office|boss|manager|salary|work|company|colleague|coworker|client|project|deadline|meeting|meetings|team|promotion)/.test(t)) {
+    return "Work";
+  }
+  // Family
+  if (/(mom|mother|dad|father|brother|sister|parents|parent|family|married|marriage|husband|wife|kids|children)/.test(t)) {
+    return "Family";
+  }
+  // Finance
+  if (/(loan|money|debt|paid|budget|bank|rupees|rs|expense|expenses|credit|rent|bill|bills|finance|financial)/.test(t)) {
+    return "Finance";
+  }
+  // Health
+  if (/(doctor|ill|sick|health|hospital|medicine|anxiety|depressed|depression|therapy|panic|stress|mental|injury|diet|exercise|sleep)/.test(t)) {
+    return "Health";
+  }
+  // School
+  if (/(school|college|university|exam|study|studies|class|teacher|assignment|homework|semester|marks|grade|grades)/.test(t)) {
+    return "School";
+  }
+  // Advice
+  if (/(advice|suggest|tip|tips|what should i do|help me decide|how do i)/.test(t)) {
+    return "Advice";
+  }
+  // Confession (fallback if clearly confessional)
+  if (/(guilty|guilt|sorry|confess|cheated|cheating|cheat|ashamed|regret|regretting|i shouldn'?t have)/.test(t)) {
+    return "Confession";
+  }
   return "Other";
+}
+
+const ALLOWED_CATS = new Set(["Work","Family","Finance","Health","School","Advice","Confession","Other"]);
+function resolveCategory(text, aiCat) {
+  let cleanAI = (aiCat || "").trim().replace(/^category\s*:\s*/i, "");
+  if (!ALLOWED_CATS.has(cleanAI)) cleanAI = "Other";
+
+  const local = localCategory(text);
+  const confidentLocal = ["Work","Family","Finance","Health","School","Advice"].includes(local);
+
+  // prefer heuristic if AI is vague
+  if (confidentLocal && (cleanAI === "Other" || cleanAI === "Confession")) {
+    return local;
+  }
+  return cleanAI || local || "Other";
 }
 
 async function generateAI(text) {
@@ -203,7 +238,6 @@ async function generateAI(text) {
     category: localCategory(text),
     source: "local",
   };
-
   if (!openai || !process.env.OPENAI_API_KEY) return fallback;
 
   try {
@@ -211,7 +245,7 @@ async function generateAI(text) {
 
 Return exactly two lines:
 1) A concise 1-sentence summary (<=20 words).
-2) Category: a single word like Work/Family/Finance/Health/School/Confession/Advice/Other.
+2) Category: a single word chosen from {Work, Family, Finance, Health, School, Confession, Advice, Other}.
 
 Secret:
 """${text}"""`;
@@ -219,18 +253,21 @@ Secret:
     const resp = await openai.chat.completions.create({
       model: "gpt-4o-mini",
       messages: [
-        { role: "system", content: "Be brief, safe, and respectful." },
+        { role: "system", content: "Be brief, safe, and use only the allowed categories." },
         { role: "user", content: prompt },
       ],
-      temperature: 0.4,
+      temperature: 0.2,
       max_tokens: 120,
     });
 
     const out = resp.choices?.[0]?.message?.content || "";
     const lines = out.split("\n").map((s) => s.trim()).filter(Boolean);
-    const summary = lines[0] || fallback.summary;
-    const category = (lines[1] || "").replace(/^category\s*:\s*/i, "") || fallback.category;
-    return { summary, category, source: "openai" };
+
+    const summaryFromAI = lines[0] || fallback.summary;
+    const aiRawCategory  = lines[1] || "";
+    const finalCategory  = resolveCategory(text, aiRawCategory);
+
+    return { summary: summaryFromAI, category: finalCategory, source: "openai" };
   } catch (err) {
     console.log("AI error (fallback used):", err.message);
     return fallback;
@@ -238,7 +275,6 @@ Secret:
 }
 
 /* ================================ Migration =============================== */
-// Migrate old embedded secrets -> Secret docs (one-time, not AI backfill)
 async function migrateEmbeddedSecretsOnce() {
   const enabled = String(process.env.MIGRATE_EMBEDDED || "true").toLowerCase() === "true";
   if (!enabled) return;
@@ -278,7 +314,6 @@ async function migrateEmbeddedSecretsOnce() {
   process.env.MIGRATE_EMBEDDED = "false";
 }
 
-/* Backfill any missing pseudonyms (NOT AI) */
 async function backfillMissingPseudonymsOnce() {
   try {
     const missing = await Secret.find({
@@ -304,52 +339,47 @@ async function backfillMissingPseudonymsOnce() {
 
 /* ================================== Routes ================================= */
 app.get("/healthz", (_req, res) => res.status(200).send("ok"));
-app.get("/", (req, res) => res.render("home"));
+app.get("/", (_req, res) => res.render("home"));
 
-/* Auth */
+/* ------------------------------ Auth Routes -------------------------------- */
 app.get("/register", (req, res) => res.render("register"));
-app.post("/register", (req, res) => {
-  const { username, password } = req.body || {};
-  if (!isNonEmptyString(username) || !isNonEmptyString(password)) return res.redirect("/register");
-  User.register({ username }, password, (err) => {
-    if (err) { console.log(err); return res.redirect("/register"); }
-    passport.authenticate("local")(req, res, () => res.redirect("/secrets"));
-  });
-});
-
 app.get("/login", (req, res) => res.render("login"));
-app.post("/login", (req, res) => {
-  const { username, password } = req.body || {};
-  if (!isNonEmptyString(username) || !isNonEmptyString(password)) return res.redirect("/login");
-  const user = new User({ username, password });
-  req.login(user, (err) => {
-    if (err) { console.log(err); return res.redirect("/login"); }
-    passport.authenticate("local")(req, res, () => res.redirect("/secrets"));
-  });
-});
 
-app.get("/logout", (req, res) => { req.logout(() => res.redirect("/")); });
-
-/* Change Password */
-app.get("/change-password", (req, res) => res.render("change-password"));
-app.post("/change-password", async (req, res) => {
-  if (!req.isAuthenticated() || !req.user) return res.redirect("/login");
-  const { oldPassword, newPassword } = req.body || {};
-  if (!isNonEmptyString(oldPassword) || !isNonEmptyString(newPassword)) return res.redirect("/change-password");
+app.post("/register", async (req, res) => {
   try {
-    const user = await User.findById(req.user._id);
-    if (!user) return res.redirect("/login");
-    user.changePassword(oldPassword, newPassword, (err) => {
-      if (err) { console.log("change-password error:", err.message); return res.redirect("/change-password"); }
-      req.logout(() => res.redirect("/login"));
+    const { username, password } = req.body || {};
+    if (!isNonEmptyString(username) || !isNonEmptyString(password)) {
+      return res.status(400).render("register", { error: "Please provide username and password." });
+    }
+
+    const user = await User.register(new User({ username }), password);
+    req.login(user, (err) => {
+      if (err) {
+        console.error("Auto-login after register failed:", err?.message || err);
+        return res.redirect("/login");
+      }
+      return res.redirect("/secrets");
     });
-  } catch (e) {
-    console.log("change-password error:", e.message);
-    res.redirect("/change-password");
+  } catch (err) {
+    console.error("Register failed:", err?.message || err);
+    return res.status(400).render("register", { error: err.message || "Registration failed" });
   }
 });
 
-/* Secrets Feed (server-rendered first page) */
+app.post("/login",
+  passport.authenticate("local", {
+    failureRedirect: "/login",
+    successRedirect: "/secrets",
+  })
+);
+
+app.get("/logout", (req, res) => {
+  req.logout(function () {
+    res.redirect("/");
+  });
+});
+
+/* ------------------------------- Secrets ---------------------------------- */
 app.get("/secrets", async (req, res) => {
   if (!req.isAuthenticated() || !req.user) return res.redirect("/login");
 
@@ -492,7 +522,7 @@ app.post("/delete", async (req, res) => {
   }
 });
 
-/* Like Toggle */
+/* Like Toggle (safe to keep even if UI removed) */
 app.post("/like", async (req, res) => {
   if (!req.isAuthenticated() || !req.user) {
     if (req.accepts("json")) return res.status(401).json({ error: "unauthenticated" });
@@ -543,8 +573,6 @@ app.post("/ai/refresh", async (req, res) => {
   }
 });
 
-
-
 /* My Secrets */
 app.get("/me", async (req, res) => {
   if (!req.isAuthenticated() || !req.user) return res.redirect("/login");
@@ -577,13 +605,11 @@ app.get("/me", async (req, res) => {
 /* ================================== Boot ================================== */
 (async () => {
   await connectMongo();
-  await migrateEmbeddedSecretsOnce();       // one-time structural migration (not AI)
-  await backfillMissingPseudonymsOnce();    // ensure anonymity labels exist
+  await migrateEmbeddedSecretsOnce();
+  await backfillMissingPseudonymsOnce();
 })();
 
-// at the very bottom of app.js
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`Server running on http://localhost:${PORT}`);
 });
-
