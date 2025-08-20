@@ -1,5 +1,9 @@
 /* ================================== Setup ================================== */
-require("dotenv").config();
+// Only load .env locally. On Render, use real env vars.
+if (process.env.NODE_ENV !== "production") {
+  require("dotenv").config();
+}
+
 
 const path = require("path");
 const express = require("express");
