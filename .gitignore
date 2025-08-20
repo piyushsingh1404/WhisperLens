@@ -1,10 +1,12 @@
 # Dependencies
 node_modules/
 
-# Env variables
+# Env files (ignore sab, sirf example track ho)
 .env
+.env.*
+!.env.example
 
-# Editor settings
+# Editor
 .vscode/
 
 # Logs
@@ -32,6 +34,6 @@ build/
 *.zip
 *.rar
 
-# Shortcuts
+# Shortcuts / random vendor folders
 *.lnk
 PredatorSense_Acer_3.00.3152_W10x64/
