@@ -37,26 +37,29 @@ app.use(
 // behind proxy (for correct secure cookie handling)
 app.set("trust proxy", 1);
 
-/* ========================== Session / Cookie Setup ========================= */
-const isProd = process.env.NODE_ENV === "production";
-/**
- * If your Render service is fully HTTPS (it is on *.onrender.com), set FORCE_SECURE_COOKIE=true
- * in env to use Secure + SameSite=None cookies. Otherwise we default to non-secure, SameSite=Lax
- * so local dev and non-https proxies still set the cookie.
- */
-const USE_SECURE =
-  isProd && String(process.env.FORCE_SECURE_COOKIE || "false").toLowerCase() === "true";
-const SAME_SITE = USE_SECURE ? "none" : "lax";
-
+/* ========================= Mongo / ENV sanity checks ====================== */
 const MONGO_URI = process.env.MONGO_URI;
 if (!MONGO_URI) {
   console.error("❌ MONGO_URI missing in .env");
   process.exit(1);
 }
+mongoose.set("strictQuery", true);
+
 if (!process.env.SESSION_SECRET) {
-  console.warn("⚠️ SESSION_SECRET missing. Set a long random secret.");
+  console.warn("⚠️ SESSION_SECRET missing. Set a long random secret in env.");
 }
 
+const isProd = process.env.NODE_ENV === "production";
+/**
+ * For Render/HTTPS: set FORCE_SECURE_COOKIE=true in your env.
+ * That enables Secure + SameSite=None cookies. Otherwise we default to SameSite=Lax, non-secure,
+ * which works in local dev and non-https paths.
+ */
+const USE_SECURE =
+  isProd && String(process.env.FORCE_SECURE_COOKIE || "false").toLowerCase() === "true";
+const SAME_SITE = USE_SECURE ? "none" : "lax";
+
+/* ================================ Sessions ================================ */
 app.use(
   session({
     name: "sid",
@@ -75,8 +78,8 @@ app.use(
       },
     }),
     cookie: {
-      secure: USE_SECURE,   // ✅ toggle with env
-      sameSite: SAME_SITE,  // ✅ 'none' when secure
+      secure: USE_SECURE,    // ✅ toggle via env
+      sameSite: SAME_SITE,   // ✅ 'none' when secure
       httpOnly: true,
       maxAge: 1000 * 60 * 60 * 8, // 8 hours
     },
@@ -86,7 +89,7 @@ app.use(
 app.use(passport.initialize());
 app.use(passport.session());
 
-/* =============================== Flash & Helpers =============================== */
+/* =============================== Flash & Helpers ========================== */
 function setFlash(req, type, message) {
   req.session.flash = { type, message };
 }
@@ -96,9 +99,10 @@ app.use((req, res, next) => {
   delete req.session.flash;
   next();
 });
+// ensure cookie is written before redirect (fixes “login lost after redirect”)
 function flashAndRedirect(req, res, type, message, to) {
   setFlash(req, type, message);
-  req.session.save(() => res.redirect(to)); // ✅ ensure cookie is written
+  req.session.save(() => res.redirect(to));
 }
 
 /* =============================== Rate Limits ============================== */
@@ -110,9 +114,7 @@ app.use("/submit", writeLimiter);
 app.use("/delete", writeLimiter);
 app.use("/ai", writeLimiter);
 
-/* ========================= Mongo + Models + Passport ======================= */
-mongoose.set("strictQuery", true);
-
+/* ========================= Models + Passport ============================== */
 /* ---- User (auth only) ---- */
 const userSchema = new mongoose.Schema({
   username: { type: String, index: true },
@@ -134,7 +136,8 @@ const secretSchema = new mongoose.Schema(
   { timestamps: true }
 );
 secretSchema.index({ createdAt: -1 });
-secretSchema.index({ aiCategory: 1 });
+// NOTE: you already have `aiCategory` indexed via the field option above;
+// avoid adding `secretSchema.index({ aiCategory: 1 })` again to silence the duplicate warning.
 secretSchema.index({ text: "text", aiSummary: "text" });
 secretSchema.methods.likeCount = function () { return (this.likes || []).length; };
 const Secret = mongoose.model("Secret", secretSchema);
@@ -155,10 +158,8 @@ async function connectMongo() {
   }
 }
 
-/* ================================ Helpers ================================= */
-function isNonEmptyString(s) {
-  return typeof s === "string" && s.trim().length > 0;
-}
+/* ================================== Utils ================================= */
+function isNonEmptyString(s) { return typeof s === "string" && s.trim().length > 0; }
 function randomPseudonym() {
   const animals = ["Lion","Tiger","Panda","Eagle","Shark","Wolf","Falcon","Koala","Otter","Cobra"];
   const colors = ["Purple","Crimson","Azure","Emerald","Amber","Ivory","Onyx","Silver","Golden","Teal"];
@@ -190,16 +191,7 @@ function avatarColorFromName(name = "") {
   return palette[h % palette.length];
 }
 function catIcon(cat = "Other") {
-  const map = {
-    Work: "briefcase",
-    Family: "people",
-    Finance: "currency-rupee",
-    Health: "heart-pulse",
-    School: "book",
-    Advice: "chat-dots",
-    Confession: "emoji-frown",
-    Other: "tag",
-  };
+  const map = { Work:"briefcase", Family:"people", Finance:"currency-rupee", Health:"heart-pulse", School:"book", Advice:"chat-dots", Confession:"emoji-frown", Other:"tag" };
   return map[cat] || "tag";
 }
 
@@ -299,10 +291,13 @@ app.post("/login", (req, res, next) => {
     if (err || !user) {
       return flashAndRedirect(req, res, "danger", info?.message || "Invalid credentials.", "/login");
     }
-    req.logIn(user, (err) => {
-      if (err) return flashAndRedirect(req, res, "danger", "Login failed. Try again.", "/login");
-      // ✅ write the session before sending the redirect so cookie isn't lost
-      req.session.save(() => flashAndRedirect(req, res, "success", "Login successful ✅", "/secrets"));
+    // optional: mitigate fixation by regenerating before establishing session
+    req.session.regenerate((regenErr) => {
+      if (regenErr) return flashAndRedirect(req, res, "danger", "Session error. Try again.", "/login");
+      req.login(user, (loginErr) => {
+        if (loginErr) return flashAndRedirect(req, res, "danger", "Login failed. Try again.", "/login");
+        req.session.save(() => flashAndRedirect(req, res, "success", "Login successful ✅", "/secrets"));
+      });
     });
   })(req, res, next);
 });
