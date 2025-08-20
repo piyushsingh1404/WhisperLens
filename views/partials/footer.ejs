@@ -8,12 +8,12 @@
 <div class="position-fixed top-0 end-0 p-3" style="z-index:1080">
   <div
     id="flashToast"
-    class="toast align-items-center text-bg-<%= (flash && flash.type) ? (flash.type === 'danger' ? 'danger' : flash.type) : 'primary' %> border-0"
+    class="toast align-items-center text-bg-<%= (typeof flash !== 'undefined' && flash && flash.type) ? (flash.type === 'danger' ? 'danger' : flash.type) : 'primary' %> border-0"
     role="alert" aria-live="assertive" aria-atomic="true"
-    <% if (!flash) { %> style="display:none" <% } %>>
+    <% if (!(typeof flash !== 'undefined' && flash)) { %> style="display:none" <% } %>>
     <div class="d-flex">
       <div class="toast-body">
-        <%= flash ? flash.message : "" %>
+        <%= (typeof flash !== 'undefined' && flash && flash.message) ? flash.message : "" %>
       </div>
       <button type="button" class="btn-close btn-close-white me-2 m-auto" data-bs-dismiss="toast" aria-label="Close"></button>
     </div>
@@ -23,23 +23,23 @@
 <script>
   // Show flash toast if present
   (function () {
-    const el = document.getElementById('flashToast');
+    var el = document.getElementById('flashToast');
     if (!el) return;
     if (el.style.display !== 'none') {
-      const t = new bootstrap.Toast(el, { delay: 2600 });
+      var t = new bootstrap.Toast(el, { delay: 2600 });
       t.show();
     }
   })();
 
-  // Eye toggle for password fields (works app-wide)
+  // Eye toggle for password fields (global)
   document.addEventListener('click', function (e) {
-    const btn = e.target.closest('[data-toggle="pw"]');
+    var btn = e.target.closest('[data-toggle="pw"]');
     if (!btn) return;
-    const targetId = btn.getAttribute('data-target');
-    const input = document.getElementById(targetId);
+    var targetId = btn.getAttribute('data-target');
+    var input = document.getElementById(targetId);
     if (!input) return;
     input.type = (input.type === 'password') ? 'text' : 'password';
-    const icon = btn.querySelector('i');
+    var icon = btn.querySelector('i');
     if (icon) icon.className = 'bi ' + (input.type === 'text' ? 'bi-eye-slash' : 'bi-eye');
   });
 </script>

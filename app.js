@@ -54,6 +54,19 @@ app.use(
 app.use(passport.initialize());
 app.use(passport.session());
 
+// ---------- FLASH (for toast popups) ----------
+function setFlash(req, type, message) {
+  // type: 'success' | 'danger' | 'warning' | 'info' | 'primary'
+  req.session.flash = { type, message };
+}
+app.use((req, res, next) => {
+  res.locals.user = req.user || null;
+  res.locals.flash = req.session.flash || null; // <-- ensure footer.ejs always gets 'flash'
+  delete req.session.flash;
+  next();
+});
+
+
 // make `user` available in all views
 app.use((req, res, next) => {
   res.locals.user = req.user || null;
