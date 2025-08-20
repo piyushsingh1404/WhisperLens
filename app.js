@@ -356,16 +356,6 @@ app.post("/delete", async (req, res) => {
   res.redirect("/secrets");
 });
 
-/* ------------------------------ Dev helper -------------------------------- */
-if (process.env.NODE_ENV !== "production") {
-  app.get("/dev/whoami", (req, res) => {
-    res.json({
-      authenticated: !!req.isAuthenticated?.() && !!req.user,
-      user: req.user ? { id: String(req.user._id), username: req.user.username } : null,
-      sessionId: req.sessionID
-    });
-  });
-}
 
 /* ================================== Boot ================================== */
 (async () => { await connectMongo(); })();
