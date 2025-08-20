@@ -34,7 +34,7 @@ app.use(
   })
 );
 
-// behind proxy (for correct secure cookie behavior on Render/Cloud)
+// behind proxy (for correct secure cookie behavior on Render)
 app.set("trust proxy", 1);
 
 /* ========================= Mongo / ENV sanity checks ====================== */
@@ -51,9 +51,8 @@ if (!process.env.SESSION_SECRET) {
 
 const isProd = process.env.NODE_ENV === "production";
 /**
- * For Render/HTTPS: set FORCE_SECURE_COOKIE=true in env.
- * This enables Secure + SameSite=None cookies (required by some proxies).
- * Otherwise we default to SameSite=Lax, non-secure (good for local dev).
+ * For Render (HTTPS): set FORCE_SECURE_COOKIE=true in env.
+ * Enables Secure + SameSite=None cookies. Otherwise we default to SameSite=Lax for local dev.
  */
 const USE_SECURE =
   isProd && String(process.env.FORCE_SECURE_COOKIE || "false").toLowerCase() === "true";
@@ -78,7 +77,7 @@ app.use(
       },
     }),
     cookie: {
-      secure: USE_SECURE,   // ✅ toggle with FORCE_SECURE_COOKIE
+      secure: USE_SECURE,   // ✅ set FORCE_SECURE_COOKIE=true on Render
       sameSite: SAME_SITE,  // ✅ 'none' only when secure is true
       httpOnly: true,
       maxAge: 1000 * 60 * 60 * 8, // 8 hours
@@ -90,7 +89,6 @@ app.use(passport.initialize());
 app.use(passport.session());
 
 /* =============================== Flash & Helpers ========================== */
-// Flash setter (for toast popups)
 function setFlash(req, type, message) {
   req.session.flash = { type, message };
 }
@@ -100,10 +98,9 @@ app.use((req, res, next) => {
   delete req.session.flash; // one-time message
   next();
 });
-// Ensure cookie is written before redirect (prevents “logged out after redirect”)
 function flashAndRedirect(req, res, type, message, to) {
   setFlash(req, type, message);
-  req.session.save(() => res.redirect(to));
+  req.session.save(() => res.redirect(to)); // ✅ ensure session is flushed before redirect
 }
 
 /* =============================== Rate Limits ============================== */
@@ -116,20 +113,18 @@ app.use("/delete", writeLimiter);
 app.use("/ai", writeLimiter);
 
 /* ========================= Models + Passport ============================== */
-/* ---- User (auth only) ---- */
 const userSchema = new mongoose.Schema({
   username: { type: String, index: true },
 });
 userSchema.plugin(passportLocalMongoose);
 const User = mongoose.model("User", userSchema);
 
-/* ---- Secret (collection) ---- */
 const secretSchema = new mongoose.Schema(
   {
     ownerId: { type: mongoose.Schema.Types.ObjectId, ref: "User", index: true, required: true },
     text: { type: String, required: true },
     aiSummary: String,
-    aiCategory: { type: String }, // <-- no index here (we add it below once)
+    aiCategory: { type: String }, // we'll add one index below to avoid duplicates
     aiSource: String,
     pseudonym: { type: String, index: true },
     likes: [{ type: mongoose.Schema.Types.ObjectId, ref: "User", index: true }],
@@ -137,7 +132,7 @@ const secretSchema = new mongoose.Schema(
   { timestamps: true }
 );
 secretSchema.index({ createdAt: -1 });
-secretSchema.index({ aiCategory: 1 }); // ✅ single place -> avoids duplicate index warning
+secretSchema.index({ aiCategory: 1 });           // ✅ single place (no duplicate)
 secretSchema.index({ text: "text", aiSummary: "text" });
 secretSchema.methods.likeCount = function () {
   return (this.likes || []).length;
@@ -161,9 +156,7 @@ async function connectMongo() {
 }
 
 /* ================================== Utils ================================= */
-function isNonEmptyString(s) {
-  return typeof s === "string" && s.trim().length > 0;
-}
+function isNonEmptyString(s) { return typeof s === "string" && s.trim().length > 0; }
 function randomPseudonym() {
   const animals = ["Lion","Tiger","Panda","Eagle","Shark","Wolf","Falcon","Koala","Otter","Cobra"];
   const colors = ["Purple","Crimson","Azure","Emerald","Amber","Ivory","Onyx","Silver","Golden","Teal"];
@@ -195,16 +188,7 @@ function avatarColorFromName(name = "") {
   return palette[h % palette.length];
 }
 function catIcon(cat = "Other") {
-  const map = {
-    Work: "briefcase",
-    Family: "people",
-    Finance: "currency-rupee",
-    Health: "heart-pulse",
-    School: "book",
-    Advice: "chat-dots",
-    Confession: "emoji-frown",
-    Other: "tag",
-  };
+  const map = { Work:"briefcase", Family:"people", Finance:"currency-rupee", Health:"heart-pulse", School:"book", Advice:"chat-dots", Confession:"emoji-frown", Other:"tag" };
   return map[cat] || "tag";
 }
 
@@ -305,7 +289,7 @@ app.post("/login", (req, res, next) => {
       setFlash(req, "danger", info?.message || "Invalid credentials.");
       return res.redirect("/login");
     }
-    // Regenerate, then log in, then save -> avoids session fixation & ensures cookie flush
+    // Regenerate, then log in, then save -> avoids fixation & ensures cookie flush
     req.session.regenerate((regenErr) => {
       if (regenErr) {
         setFlash(req, "danger", "Session error. Try again.");
@@ -349,7 +333,6 @@ app.post("/submit", async (req, res) => {
     pseudonym: randomPseudonym(),
   });
 
-  // Background AI enrichment (non-blocking)
   setImmediate(async () => {
     try {
       const { summary, category, source } = await generateAI(submittedSecret);
