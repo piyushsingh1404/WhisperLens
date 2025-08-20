@@ -1,6 +1,45 @@
-<footer class="border-top mt-5">
-  <div class="container container-narrow site-footer small py-3">
-    © <%= new Date().getFullYear() %> Secrets
-  </div>
+<footer class="border-top mt-5 py-3 text-center text-muted">
+  <small>© <%= new Date().getFullYear() %> Secrets</small>
 </footer>
+
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+
+<!-- Flash Toast -->
+<div class="position-fixed top-0 end-0 p-3" style="z-index:1080">
+  <div
+    id="flashToast"
+    class="toast align-items-center text-bg-<%= (flash && flash.type) ? (flash.type === 'danger' ? 'danger' : flash.type) : 'primary' %> border-0"
+    role="alert" aria-live="assertive" aria-atomic="true"
+    <% if (!flash) { %> style="display:none" <% } %>>
+    <div class="d-flex">
+      <div class="toast-body">
+        <%= flash ? flash.message : "" %>
+      </div>
+      <button type="button" class="btn-close btn-close-white me-2 m-auto" data-bs-dismiss="toast" aria-label="Close"></button>
+    </div>
+  </div>
+</div>
+
+<script>
+  // Show flash toast if present
+  (function () {
+    const el = document.getElementById('flashToast');
+    if (!el) return;
+    if (el.style.display !== 'none') {
+      const t = new bootstrap.Toast(el, { delay: 2600 });
+      t.show();
+    }
+  })();
+
+  // Eye toggle for password fields (works app-wide)
+  document.addEventListener('click', function (e) {
+    const btn = e.target.closest('[data-toggle="pw"]');
+    if (!btn) return;
+    const targetId = btn.getAttribute('data-target');
+    const input = document.getElementById(targetId);
+    if (!input) return;
+    input.type = (input.type === 'password') ? 'text' : 'password';
+    const icon = btn.querySelector('i');
+    if (icon) icon.className = 'bi ' + (input.type === 'text' ? 'bi-eye-slash' : 'bi-eye');
+  });
+</script>
