@@ -34,7 +34,7 @@ app.use(
   })
 );
 
-// behind proxy (for correct secure cookie handling)
+// behind proxy (for correct secure cookie behavior on Render/Cloud)
 app.set("trust proxy", 1);
 
 /* ========================= Mongo / ENV sanity checks ====================== */
@@ -51,15 +51,15 @@ if (!process.env.SESSION_SECRET) {
 
 const isProd = process.env.NODE_ENV === "production";
 /**
- * For Render/HTTPS: set FORCE_SECURE_COOKIE=true in your env.
- * That enables Secure + SameSite=None cookies. Otherwise we default to SameSite=Lax, non-secure,
- * which works in local dev and non-https paths.
+ * For Render/HTTPS: set FORCE_SECURE_COOKIE=true in env.
+ * This enables Secure + SameSite=None cookies (required by some proxies).
+ * Otherwise we default to SameSite=Lax, non-secure (good for local dev).
  */
 const USE_SECURE =
   isProd && String(process.env.FORCE_SECURE_COOKIE || "false").toLowerCase() === "true";
 const SAME_SITE = USE_SECURE ? "none" : "lax";
 
-/* ================================ Sessions ================================ */
+/* ================================= Sessions =============================== */
 app.use(
   session({
     name: "sid",
@@ -78,8 +78,8 @@ app.use(
       },
     }),
     cookie: {
-      secure: USE_SECURE,    // ✅ toggle via env
-      sameSite: SAME_SITE,   // ✅ 'none' when secure
+      secure: USE_SECURE,   // ✅ toggle with FORCE_SECURE_COOKIE
+      sameSite: SAME_SITE,  // ✅ 'none' only when secure is true
       httpOnly: true,
       maxAge: 1000 * 60 * 60 * 8, // 8 hours
     },
@@ -90,16 +90,17 @@ app.use(passport.initialize());
 app.use(passport.session());
 
 /* =============================== Flash & Helpers ========================== */
+// Flash setter (for toast popups)
 function setFlash(req, type, message) {
   req.session.flash = { type, message };
 }
 app.use((req, res, next) => {
   res.locals.user = req.user || null;
   res.locals.flash = req.session.flash || null;
-  delete req.session.flash;
+  delete req.session.flash; // one-time message
   next();
 });
-// ensure cookie is written before redirect (fixes “login lost after redirect”)
+// Ensure cookie is written before redirect (prevents “logged out after redirect”)
 function flashAndRedirect(req, res, type, message, to) {
   setFlash(req, type, message);
   req.session.save(() => res.redirect(to));
@@ -128,7 +129,7 @@ const secretSchema = new mongoose.Schema(
     ownerId: { type: mongoose.Schema.Types.ObjectId, ref: "User", index: true, required: true },
     text: { type: String, required: true },
     aiSummary: String,
-    aiCategory: { type: String, index: true },
+    aiCategory: { type: String }, // <-- no index here (we add it below once)
     aiSource: String,
     pseudonym: { type: String, index: true },
     likes: [{ type: mongoose.Schema.Types.ObjectId, ref: "User", index: true }],
@@ -136,10 +137,11 @@ const secretSchema = new mongoose.Schema(
   { timestamps: true }
 );
 secretSchema.index({ createdAt: -1 });
-// NOTE: you already have `aiCategory` indexed via the field option above;
-// avoid adding `secretSchema.index({ aiCategory: 1 })` again to silence the duplicate warning.
+secretSchema.index({ aiCategory: 1 }); // ✅ single place -> avoids duplicate index warning
 secretSchema.index({ text: "text", aiSummary: "text" });
-secretSchema.methods.likeCount = function () { return (this.likes || []).length; };
+secretSchema.methods.likeCount = function () {
+  return (this.likes || []).length;
+};
 const Secret = mongoose.model("Secret", secretSchema);
 
 /* ------------------------------ Passport ---------------------------------- */
@@ -159,7 +161,9 @@ async function connectMongo() {
 }
 
 /* ================================== Utils ================================= */
-function isNonEmptyString(s) { return typeof s === "string" && s.trim().length > 0; }
+function isNonEmptyString(s) {
+  return typeof s === "string" && s.trim().length > 0;
+}
 function randomPseudonym() {
   const animals = ["Lion","Tiger","Panda","Eagle","Shark","Wolf","Falcon","Koala","Otter","Cobra"];
   const colors = ["Purple","Crimson","Azure","Emerald","Amber","Ivory","Onyx","Silver","Golden","Teal"];
@@ -191,7 +195,16 @@ function avatarColorFromName(name = "") {
   return palette[h % palette.length];
 }
 function catIcon(cat = "Other") {
-  const map = { Work:"briefcase", Family:"people", Finance:"currency-rupee", Health:"heart-pulse", School:"book", Advice:"chat-dots", Confession:"emoji-frown", Other:"tag" };
+  const map = {
+    Work: "briefcase",
+    Family: "people",
+    Finance: "currency-rupee",
+    Health: "heart-pulse",
+    School: "book",
+    Advice: "chat-dots",
+    Confession: "emoji-frown",
+    Other: "tag",
+  };
   return map[cat] || "tag";
 }
 
@@ -289,14 +302,24 @@ app.post("/register", async (req, res) => {
 app.post("/login", (req, res, next) => {
   passport.authenticate("local", (err, user, info) => {
     if (err || !user) {
-      return flashAndRedirect(req, res, "danger", info?.message || "Invalid credentials.", "/login");
+      setFlash(req, "danger", info?.message || "Invalid credentials.");
+      return res.redirect("/login");
     }
-    // optional: mitigate fixation by regenerating before establishing session
+    // Regenerate, then log in, then save -> avoids session fixation & ensures cookie flush
     req.session.regenerate((regenErr) => {
-      if (regenErr) return flashAndRedirect(req, res, "danger", "Session error. Try again.", "/login");
-      req.login(user, (loginErr) => {
-        if (loginErr) return flashAndRedirect(req, res, "danger", "Login failed. Try again.", "/login");
-        req.session.save(() => flashAndRedirect(req, res, "success", "Login successful ✅", "/secrets"));
+      if (regenErr) {
+        setFlash(req, "danger", "Session error. Try again.");
+        return res.redirect("/login");
+      }
+      req.logIn(user, (loginErr) => {
+        if (loginErr) {
+          setFlash(req, "danger", "Login failed. Try again.");
+          return res.redirect("/login");
+        }
+        req.session.save(() => {
+          setFlash(req, "success", "Login successful ✅");
+          return res.redirect("/secrets");
+        });
       });
     });
   })(req, res, next);
@@ -319,11 +342,14 @@ app.post("/submit", async (req, res) => {
   if (!req.isAuthenticated() || !req.user) return res.redirect("/login");
   const submittedSecret = (req.body.secret || "").trim();
   if (!submittedSecret) return res.redirect("/secrets");
+
   const doc = await Secret.create({
     ownerId: req.user._id,
     text: submittedSecret,
     pseudonym: randomPseudonym(),
   });
+
+  // Background AI enrichment (non-blocking)
   setImmediate(async () => {
     try {
       const { summary, category, source } = await generateAI(submittedSecret);
@@ -333,6 +359,7 @@ app.post("/submit", async (req, res) => {
       );
     } catch (_) {}
   });
+
   res.redirect("/secrets");
 });
 
