@@ -6,6 +6,7 @@ const express = require("express");
 const ejs = require("ejs");
 const mongoose = require("mongoose");
 const session = require("express-session");
+const MongoStore = require("connect-mongo");              // session store
 const passport = require("passport");
 const passportLocalMongoose = require("passport-local-mongoose");
 const helmet = require("helmet");
@@ -19,12 +20,12 @@ try {
 } catch (_) {}
 
 const app = express();
+const isProd = process.env.NODE_ENV === "production";     // ✅ declare ONCE
 
 /* ============================== Express Core ============================== */
 app.set("view engine", "ejs");
 app.set("views", path.join(__dirname, "views"));
 app.use(express.static("public"));
-// built-in body parser
 app.use(express.urlencoded({ extended: true }));
 
 app.use(
@@ -34,19 +35,43 @@ app.use(
   })
 );
 
-// many PaaS sit behind a proxy
-app.set("trust proxy", 1);
+// proxy only in prod (Render/Heroku etc.)
+if (isProd) app.set("trust proxy", 1);
 
+/* ============================ Mongo Connection ============================ */
+const MONGO_URI = process.env.MONGO_URI;
+if (!MONGO_URI) {
+  console.error("❌ MONGO_URI missing in .env");
+  process.exit(1);
+}
+mongoose.set("strictQuery", true);
+(async () => {
+  try {
+    await mongoose.connect(MONGO_URI, { serverSelectionTimeoutMS: 12000 });
+    console.log("✅ MongoDB connected");
+  } catch (err) {
+    console.error("❌ MongoDB connect error:", err?.message || err);
+    process.exit(1);
+  }
+})();
+
+/* =============================== Sessions ================================= */
 app.use(
   session({
-    secret: process.env.SESSION_SECRET || "ourLittleSecret",
+    name: "secrets.sid",
+    secret: process.env.SESSION_SECRET || "dev-change-me",
     resave: false,
     saveUninitialized: false,
+    store: MongoStore.create({
+      mongoUrl: MONGO_URI,
+      collectionName: "sessions",
+      ttl: 60 * 60 * 8, // 8 hours
+    }),
     cookie: {
-      secure: process.env.NODE_ENV === "production",
-      sameSite: "lax",
       httpOnly: true,
-      maxAge: 1000 * 60 * 60 * 8, // 8 hours
+      secure: isProd,                         // dev=false, prod=true
+      sameSite: isProd ? "none" : "lax",
+      maxAge: 1000 * 60 * 60 * 8,
     },
   })
 );
@@ -54,24 +79,45 @@ app.use(
 app.use(passport.initialize());
 app.use(passport.session());
 
-// ---------- FLASH (for toast popups) ----------
-function setFlash(req, type, message) {
-  // type: 'success' | 'danger' | 'warning' | 'info' | 'primary'
-  req.session.flash = { type, message };
-}
+/* ================================ FLASH =================================== */
+function setFlash(req, type, message) { req.session.flash = { type, message }; }
 app.use((req, res, next) => {
   res.locals.user = req.user || null;
-  res.locals.flash = req.session.flash || null; // <-- ensure footer.ejs always gets 'flash'
+  res.locals.flash = req.session.flash || null;
   delete req.session.flash;
   next();
 });
+function flashAndRedirect(req, res, type, message, to) {
+  setFlash(req, type, message);
+  req.session.save(() => res.redirect(to));
+}
 
-
-// make `user` available in all views
-app.use((req, res, next) => {
-  res.locals.user = req.user || null;
-  next();
+/* ========================= Models + Passport ============================== */
+const userSchema = new mongoose.Schema({
+  username: { type: String, index: true, unique: false },
 });
+userSchema.plugin(passportLocalMongoose);
+const User = mongoose.model("User", userSchema);
+
+const secretSchema = new mongoose.Schema(
+  {
+    ownerId: { type: mongoose.Schema.Types.ObjectId, ref: "User", index: true, required: true },
+    text: { type: String, required: true },
+    aiSummary: String,
+    aiCategory: { type: String, index: true },
+    aiSource: String,
+    pseudonym: { type: String, index: true },
+    likes: [{ type: mongoose.Schema.Types.ObjectId, ref: "User", index: true }],
+  },
+  { timestamps: true }
+);
+secretSchema.index({ createdAt: -1 });
+secretSchema.index({ text: "text", aiSummary: "text" });
+const Secret = mongoose.model("Secret", secretSchema);
+
+passport.use(User.createStrategy());
+passport.serializeUser(User.serializeUser());
+passport.deserializeUser(User.deserializeUser());
 
 /* =============================== Rate Limits ============================== */
 const authLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 20 });
@@ -82,62 +128,8 @@ app.use("/submit", writeLimiter);
 app.use("/delete", writeLimiter);
 app.use("/ai", writeLimiter);
 
-/* ========================= Mongo + Models + Passport ======================= */
-const MONGO_URI = process.env.MONGO_URI;
-if (!MONGO_URI) {
-  console.error("❌ MONGO_URI missing in .env");
-  process.exit(1);
-}
-mongoose.set("strictQuery", true);
-
-/* ---- User (auth only) ---- */
-const userSchema = new mongoose.Schema({
-  username: { type: String, index: true, unique: false }, // PLM manages unique index
-});
-userSchema.plugin(passportLocalMongoose); // adds hash/salt + helpers
-const User = mongoose.model("User", userSchema);
-
-/* ---- Secret (collection) ---- */
-const secretSchema = new mongoose.Schema(
-  {
-    ownerId: { type: mongoose.Schema.Types.ObjectId, ref: "User", index: true, required: true },
-    text: { type: String, required: true },
-    aiSummary: String,
-    aiCategory: { type: String, index: true },
-    aiSource: String,
-    pseudonym: { type: String, index: true },
-    likes: [{ type: mongoose.Schema.Types.ObjectId, ref: "User", index: true }], // harmless if unused
-  },
-  { timestamps: true }
-);
-secretSchema.index({ createdAt: -1 });
-secretSchema.index({ aiCategory: 1 });
-secretSchema.index({ text: "text", aiSummary: "text" });
-secretSchema.methods.likeCount = function () { return (this.likes || []).length; };
-
-const Secret = mongoose.model("Secret", secretSchema);
-
-/* ------------------------------ Passport ---------------------------------- */
-passport.use(User.createStrategy());
-passport.serializeUser(User.serializeUser());
-passport.deserializeUser(User.deserializeUser());
-
-/* ------------------------------- Connect ---------------------------------- */
-async function connectMongo() {
-  try {
-    await mongoose.connect(MONGO_URI, { serverSelectionTimeoutMS: 12000 });
-    console.log("✅ MongoDB connected");
-  } catch (err) {
-    console.error("❌ MongoDB connect error:", err?.message || err);
-    process.exit(1);
-  }
-}
-
 /* ================================ Helpers ================================= */
-function isNonEmptyString(s) {
-  return typeof s === "string" && s.trim().length > 0;
-}
-
+function isNonEmptyString(s) { return typeof s === "string" && s.trim().length > 0; }
 function randomPseudonym() {
   const animals = ["Lion","Tiger","Panda","Eagle","Shark","Wolf","Falcon","Koala","Otter","Cobra"];
   const colors  = ["Purple","Crimson","Azure","Emerald","Amber","Ivory","Onyx","Silver","Golden","Teal"];
@@ -157,28 +149,13 @@ function makeStablePseudonym(userId) {
   return `${c}${a}${d}`;
 }
 function avatarColorFromName(name = "") {
-  const palette = [
-    "#E57373","#F06292","#BA68C8","#9575CD","#7986CB",
-    "#64B5F6","#4FC3F7","#4DD0E1","#4DB6AC","#81C784",
-    "#AED581","#DCE775","#FFF176","#FFD54F","#FFB74D",
-    "#A1887F","#90A4AE",
-  ];
+  const palette = ["#E57373","#F06292","#BA68C8","#9575CD","#7986CB","#64B5F6","#4FC3F7","#4DD0E1","#4DB6AC","#81C784","#AED581","#DCE775","#FFF176","#FFD54F","#FFB74D","#A1887F","#90A4AE"];
   const s = String(name);
-  let h = 0;
-  for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) >>> 0;
+  let h = 0; for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) >>> 0;
   return palette[h % palette.length];
 }
 function catIcon(cat = "Other") {
-  const map = {
-    Work: "briefcase",
-    Family: "people",
-    Finance: "currency-rupee",
-    Health: "heart-pulse",
-    School: "book",
-    Advice: "chat-dots",
-    Confession: "emoji-frown",
-    Other: "tag",
-  };
+  const map = { Work:"briefcase", Family:"people", Finance:"currency-rupee", Health:"heart-pulse", School:"book", Advice:"chat-dots", Confession:"emoji-frown", Other:"tag" };
   return map[cat] || "tag";
 }
 
@@ -194,65 +171,29 @@ function localSummarize(text) {
   if (!/[.!?]$/.test(summary)) summary += ".";
   return summary;
 }
-
-/* Stronger heuristic */
 function localCategory(text) {
   const t = (text || "").toLowerCase();
-
-  // Work
-  if (/(job|office|boss|manager|salary|work|company|colleague|coworker|client|project|deadline|meeting|meetings|team|promotion)/.test(t)) {
-    return "Work";
-  }
-  // Family
-  if (/(mom|mother|dad|father|brother|sister|parents|parent|family|married|marriage|husband|wife|kids|children)/.test(t)) {
-    return "Family";
-  }
-  // Finance
-  if (/(loan|money|debt|paid|budget|bank|rupees|rs|expense|expenses|credit|rent|bill|bills|finance|financial)/.test(t)) {
-    return "Finance";
-  }
-  // Health
-  if (/(doctor|ill|sick|health|hospital|medicine|anxiety|depressed|depression|therapy|panic|stress|mental|injury|diet|exercise|sleep)/.test(t)) {
-    return "Health";
-  }
-  // School
-  if (/(school|college|university|exam|study|studies|class|teacher|assignment|homework|semester|marks|grade|grades)/.test(t)) {
-    return "School";
-  }
-  // Advice
-  if (/(advice|suggest|tip|tips|what should i do|help me decide|how do i)/.test(t)) {
-    return "Advice";
-  }
-  // Confession (fallback if clearly confessional)
-  if (/(guilty|guilt|sorry|confess|cheated|cheating|cheat|ashamed|regret|regretting|i shouldn'?t have)/.test(t)) {
-    return "Confession";
-  }
+  if (/(job|office|boss|manager|salary|work|company|colleague|coworker|client|project|deadline|meeting|meetings|team|promotion)/.test(t)) return "Work";
+  if (/(mom|mother|dad|father|brother|sister|parents|parent|family|married|marriage|husband|wife|kids|children)/.test(t)) return "Family";
+  if (/(loan|money|debt|paid|budget|bank|rupees|rs|expense|expenses|credit|rent|bill|bills|finance|financial)/.test(t)) return "Finance";
+  if (/(doctor|ill|sick|health|hospital|medicine|anxiety|depressed|depression|therapy|panic|stress|mental|injury|diet|exercise|sleep)/.test(t)) return "Health";
+  if (/(school|college|university|exam|study|studies|class|teacher|assignment|homework|semester|marks|grade|grades)/.test(t)) return "School";
+  if (/(advice|suggest|tip|tips|what should i do|help me decide|how do i)/.test(t)) return "Advice";
+  if (/(guilty|guilt|sorry|confess|cheated|cheating|cheat|ashamed|regret|regretting|i shouldn'?t have)/.test(t)) return "Confession";
   return "Other";
 }
-
 const ALLOWED_CATS = new Set(["Work","Family","Finance","Health","School","Advice","Confession","Other"]);
 function resolveCategory(text, aiCat) {
   let cleanAI = (aiCat || "").trim().replace(/^category\s*:\s*/i, "");
   if (!ALLOWED_CATS.has(cleanAI)) cleanAI = "Other";
-
   const local = localCategory(text);
   const confidentLocal = ["Work","Family","Finance","Health","School","Advice"].includes(local);
-
-  // prefer heuristic if AI is vague
-  if (confidentLocal && (cleanAI === "Other" || cleanAI === "Confession")) {
-    return local;
-  }
+  if (confidentLocal && (cleanAI === "Other" || cleanAI === "Confession")) return local;
   return cleanAI || local || "Other";
 }
-
 async function generateAI(text) {
-  const fallback = {
-    summary: localSummarize(text),
-    category: localCategory(text),
-    source: "local",
-  };
+  const fallback = { summary: localSummarize(text), category: localCategory(text), source: "local" };
   if (!openai || !process.env.OPENAI_API_KEY) return fallback;
-
   try {
     const prompt = `You will receive the user's secret.
 
@@ -262,91 +203,23 @@ Return exactly two lines:
 
 Secret:
 """${text}"""`;
-
     const resp = await openai.chat.completions.create({
       model: "gpt-4o-mini",
       messages: [
         { role: "system", content: "Be brief, safe, and use only the allowed categories." },
         { role: "user", content: prompt },
       ],
-      temperature: 0.2,
-      max_tokens: 120,
+      temperature: 0.2, max_tokens: 120,
     });
-
     const out = resp.choices?.[0]?.message?.content || "";
     const lines = out.split("\n").map((s) => s.trim()).filter(Boolean);
-
     const summaryFromAI = lines[0] || fallback.summary;
     const aiRawCategory  = lines[1] || "";
     const finalCategory  = resolveCategory(text, aiRawCategory);
-
     return { summary: summaryFromAI, category: finalCategory, source: "openai" };
   } catch (err) {
     console.log("AI error (fallback used):", err.message);
     return fallback;
-  }
-}
-
-/* ================================ Migration =============================== */
-async function migrateEmbeddedSecretsOnce() {
-  const enabled = String(process.env.MIGRATE_EMBEDDED || "true").toLowerCase() === "true";
-  if (!enabled) return;
-
-  const rawUsers = mongoose.connection.collection("users");
-  const cursor = rawUsers.find({ "secrets.0": { $exists: true } }, { projection: { username: 1, secrets: 1 } });
-
-  let created = 0, cleared = 0;
-  while (await cursor.hasNext()) {
-    const u = await cursor.next();
-    const uid = u._id;
-
-    if (Array.isArray(u.secrets)) {
-      for (const s of u.secrets) {
-        const exists = await Secret.exists({ ownerId: uid, text: s.text });
-        if (exists) continue;
-
-        await Secret.create({
-          ownerId: uid,
-          text: s.text || "",
-          aiSummary: s.aiSummary || null,
-          aiCategory: s.aiCategory || null,
-          aiSource: s.aiSource || null,
-          pseudonym: randomPseudonym(),
-          createdAt: s.createdAt || undefined,
-          updatedAt: s.updatedAt || undefined,
-        });
-        created++;
-      }
-    }
-
-    await rawUsers.updateOne({ _id: uid }, { $unset: { secrets: "" } });
-    cleared++;
-  }
-
-  console.log(`🔧 Migration done: created ${created} Secret docs, cleared embedded for ${cleared} user(s).`);
-  process.env.MIGRATE_EMBEDDED = "false";
-}
-
-async function backfillMissingPseudonymsOnce() {
-  try {
-    const missing = await Secret.find({
-      $or: [{ pseudonym: { $exists: false } }, { pseudonym: null }, { pseudonym: "" }],
-    }).lean(false);
-
-    if (!missing.length) {
-      console.log("🪪 Pseudonym backfill: none needed");
-      return;
-    }
-
-    let updated = 0;
-    for (const s of missing) {
-      s.pseudonym = makeStablePseudonym(s.ownerId);
-      await s.save();
-      updated++;
-    }
-    console.log(`🪪 Pseudonym backfill: assigned ${updated} pseudonym(s)`);
-  } catch (e) {
-    console.error("🪪 Pseudonym backfill error:", e?.message || e);
   }
 }
 
@@ -362,33 +235,44 @@ app.post("/register", async (req, res) => {
   try {
     const { username, password } = req.body || {};
     if (!isNonEmptyString(username) || !isNonEmptyString(password)) {
-      return res.status(400).render("register", { error: "Please provide username and password." });
+      return flashAndRedirect(req, res, "danger", "Please provide username and password.", "/register");
     }
-
     const user = await User.register(new User({ username }), password);
-    req.login(user, (err) => {
-      if (err) {
-        console.error("Auto-login after register failed:", err?.message || err);
-        return res.redirect("/login");
-      }
-      return res.redirect("/secrets");
+    req.session.regenerate((regenErr) => {
+      if (regenErr) return flashAndRedirect(req, res, "warning", "Session error. Please login.", "/login");
+      req.logIn(user, (err) => {
+        if (err) return flashAndRedirect(req, res, "warning", "Registered, but auto login failed. Please login.", "/login");
+        setFlash(req, "success", "Registration successful! 🎉");
+        req.session.save(() => res.redirect("/secrets"));
+      });
     });
   } catch (err) {
-    console.error("Register failed:", err?.message || err);
-    return res.status(400).render("register", { error: err.message || "Registration failed" });
+    return flashAndRedirect(req, res, "danger", err.message || "Registration failed.", "/register");
   }
 });
 
-app.post("/login",
-  passport.authenticate("local", {
-    failureRedirect: "/login",
-    successRedirect: "/secrets",
-  })
-);
+app.post("/login", (req, res, next) => {
+  passport.authenticate("local", (err, user, info) => {
+    if (err) return flashAndRedirect(req, res, "danger", "Login failed. Try again.", "/login");
+    if (!user) return flashAndRedirect(req, res, "danger", info?.message || "Invalid credentials.", "/login");
+
+    req.session.regenerate((regenErr) => {
+      if (regenErr) return flashAndRedirect(req, res, "danger", "Session error. Try again.", "/login");
+      req.logIn(user, (loginErr) => {
+        if (loginErr) return flashAndRedirect(req, res, "danger", "Login failed. Try again.", "/login");
+        setFlash(req, "success", "Login successful ✅");
+        req.session.save(() => res.redirect("/secrets"));
+      });
+    });
+  })(req, res, next);
+});
 
 app.get("/logout", (req, res) => {
-  req.logout(function () {
-    res.redirect("/");
+  req.logout(() => {
+    req.session.destroy(() => {
+      res.clearCookie("secrets.sid");
+      res.redirect("/");
+    });
   });
 });
 
@@ -406,42 +290,28 @@ app.get("/secrets", async (req, res) => {
   if (cat) match.aiCategory = cat;
   if (q) match.$or = [{ text: { $regex: q, $options: "i" } }, { aiSummary: { $regex: q, $options: "i" } }];
 
-  try {
-    const [rows, total] = await Promise.all([
-      Secret.find(match).sort({ createdAt: -1 }).skip(skip).limit(limit).lean(),
-      Secret.countDocuments(match),
-    ]);
+  const [rows, total] = await Promise.all([
+    Secret.find(match).sort({ createdAt: -1 }).skip(skip).limit(limit).lean(),
+    Secret.countDocuments(match),
+  ]);
 
-    const secrets = rows.map(s => {
-      const name = s.pseudonym || makeStablePseudonym(s.ownerId);
-      return {
-        userId: s.ownerId,
-        username: name,
-        avatarColor: avatarColorFromName(name),
-        liked: (s.likes || []).some(id => String(id) === String(req.user._id)),
-        likeCount: (s.likes || []).length,
-        secret: s,
-      };
-    });
+  const secrets = rows.map(s => {
+    const name = s.pseudonym || makeStablePseudonym(s.ownerId);
+    return {
+      userId: s.ownerId,
+      username: name,
+      avatarColor: avatarColorFromName(name),
+      liked: (s.likes || []).some(id => String(id) === String(req.user._id)),
+      likeCount: (s.likes || []).length,
+      secret: s,
+    };
+  });
 
-    const totalPages = Math.max(Math.ceil(total / limit), 1);
-
-    res.render("secrets", {
-      secrets,
-      currentUserId: req.user._id,
-      page, totalPages, q, cat, limit
-    });
-  } catch (e) {
-    console.error(e);
-    res.render("secrets", {
-      secrets: [],
-      currentUserId: req.user?._id || null,
-      page: 1, totalPages: 1, q, cat, limit
-    });
-  }
+  const totalPages = Math.max(Math.ceil(total / limit), 1);
+  res.render("secrets", { secrets, currentUserId: req.user._id, page, totalPages, q, cat, limit });
 });
 
-/* JSON feed for infinite scroll */
+/* JSON feed */
 app.get("/api/secrets", async (req, res) => {
   if (!req.isAuthenticated() || !req.user) return res.status(401).json({ error: "unauthenticated" });
 
@@ -487,7 +357,6 @@ app.get("/submit", (req, res) => {
   if (!req.isAuthenticated() || !req.user) return res.redirect("/login");
   res.render("submit");
 });
-
 app.post("/submit", async (req, res) => {
   if (!req.isAuthenticated() || !req.user) return res.redirect("/login");
   try {
@@ -500,7 +369,6 @@ app.post("/submit", async (req, res) => {
       pseudonym: randomPseudonym(),
     });
 
-    // Background AI enrichment for THIS new secret only
     setImmediate(async () => {
       try {
         const { summary, category, source } = await generateAI(submittedSecret);
@@ -520,108 +388,44 @@ app.post("/submit", async (req, res) => {
   }
 });
 
-/* Delete */
-app.post("/delete", async (req, res) => {
-  try {
-    if (!req.isAuthenticated() || !req.user) return res.redirect("/login");
-    const { secretId } = req.body || {};
-    if (!secretId) return res.redirect("/secrets");
-
-    await Secret.deleteOne({ _id: secretId, ownerId: req.user._id });
-    return res.redirect("/secrets");
-  } catch (err) {
-    console.error("Delete error:", err);
-    return res.redirect("/secrets");
-  }
-});
-
-/* Like Toggle (safe to keep even if UI removed) */
-app.post("/like", async (req, res) => {
-  if (!req.isAuthenticated() || !req.user) {
-    if (req.accepts("json")) return res.status(401).json({ error: "unauthenticated" });
-    return res.redirect("/login");
-  }
-  const { secretId } = req.body || {};
-  if (!secretId) return req.accepts("json") ? res.status(400).json({ error: "missing id" }) : res.redirect("/secrets");
-
-  const s = await Secret.findById(secretId);
-  if (!s) return req.accepts("json") ? res.status(404).json({ error: "not found" }) : res.redirect("/secrets");
-
-  const uid = String(req.user._id);
-  const has = (s.likes || []).some(id => String(id) === uid);
-  if (has) {
-    s.likes = s.likes.filter(id => String(id) !== uid);
-  } else {
-    s.likes = s.likes || [];
-    s.likes.push(req.user._id);
-  }
-  await s.save();
-
-  if (req.accepts("json")) {
-    return res.json({ liked: !has, likeCount: s.likes.length });
-  }
-  res.redirect("/secrets");
-});
-
-/* AI: per-secret refresh */
-app.post("/ai/refresh", async (req, res) => {
-  try {
-    if (!req.isAuthenticated() || !req.user) return res.redirect("/login");
-    const { secretId } = req.body || {};
-    if (!secretId) return res.redirect("/secrets");
-
-    const s = await Secret.findOne({ _id: secretId, ownerId: req.user._id });
-    if (!s) return res.redirect("/secrets");
-
-    const { summary, category, source } = await generateAI(s.text || "");
-    s.aiSummary = summary;
-    s.aiCategory = category;
-    s.aiSource   = source;
-    await s.save();
-
-    return res.redirect("/secrets");
-  } catch (e) {
-    console.error("ai/refresh error:", e);
-    return res.redirect("/secrets");
-  }
-});
-
-/* My Secrets */
-app.get("/me", async (req, res) => {
-  if (!req.isAuthenticated() || !req.user) return res.redirect("/login");
-
-  const page = Math.max(parseInt(req.query.page || "1", 10), 1);
-  const limit = Math.min(Math.max(parseInt(req.query.limit || "10", 10), 5), 50);
-  const skip = (page - 1) * limit;
-
-  const [rows, total] = await Promise.all([
-    Secret.find({ ownerId: req.user._id }).sort({ createdAt: -1 }).skip(skip).limit(limit).lean(),
-    Secret.countDocuments({ ownerId: req.user._id }),
-  ]);
-
-  const secrets = rows.map(s => {
-    const name = s.pseudonym || makeStablePseudonym(s.ownerId);
-    return {
-      userId: s.ownerId,
-      username: name,
-      avatarColor: avatarColorFromName(name),
-      liked: (s.likes || []).some(id => String(id) === String(req.user._id)),
-      likeCount: (s.likes || []).length,
-      secret: s,
-    };
+/* ============================== Dev Utilities ============================== */
+if (!isProd) {
+  app.get("/dev/seed", async (req, res) => {
+    try {
+      const exists = await User.findOne({ username: "test@local" });
+      if (!exists) await User.register(new User({ username: "test@local" }), "test123");
+      res.send("Seeded: username=test@local, password=test123");
+    } catch (e) {
+      res.status(500).send("Seed error: " + e.message);
+    }
   });
 
-  const totalPages = Math.max(Math.ceil(total / limit), 1);
-  res.render("my-secrets", { secrets, currentUserId: req.user._id, page, totalPages, limit });
-});
+  app.get("/dev/set", (req, res) => {
+    req.session.testStamp = Date.now();
+    req.session.save(() => res.send(`SET OK. sid=${req.sessionID}`));
+  });
+  app.get("/dev/get", (req, res) => {
+    res.json({
+      sid: req.sessionID,
+      hasTestStamp: !!req.session.testStamp,
+      testStamp: req.session.testStamp || null,
+      cookieHeader: req.headers.cookie || null,
+      authenticated: !!req.isAuthenticated?.() && !!req.user,
+      user: req.user || null,
+    });
+  });
+
+  app.get("/dev/whoami", (req, res) => {
+    res.json({
+      authenticated: !!req.isAuthenticated?.() && !!req.user,
+      user: req.user ? { id: String(req.user._id), username: req.user.username } : null,
+      sid: req.sessionID,
+      cookieHeader: req.headers.cookie || null,
+    });
+  });
+}
 
 /* ================================== Boot ================================== */
-(async () => {
-  await connectMongo();
-  await migrateEmbeddedSecretsOnce();
-  await backfillMissingPseudonymsOnce();
-})();
-
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`Server running on http://localhost:${PORT}`);
